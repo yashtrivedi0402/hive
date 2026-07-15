@@ -1,47 +1,74 @@
+# -----------------------------------------------------------------------------
 # Aden Tools MCP Server
-# Exposes tools via Model Context Protocol
+# Exposes tools via Model Context Protocol (MCP)
+# -----------------------------------------------------------------------------
 
 FROM python:3.11-slim
 
+# Python runtime configuration
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
-# Copy project files
-COPY pyproject.toml ./
-COPY README.md ./
+# -----------------------------------------------------------------------------
+# Install system dependencies and Google Chrome
+# -----------------------------------------------------------------------------
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        wget \
+        gnupg && \
+    mkdir -p /etc/apt/keyrings && \
+    wget -q -O /etc/apt/keyrings/google-chrome.asc \
+        https://dl.google.com/linux/linux_signing_key.pub && \
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.asc] \
+        http://dl.google.com/linux/chrome/deb/ stable main" \
+        > /etc/apt/sources.list.d/google-chrome.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends google-chrome-stable && \
+    apt-get purge -y wget gnupg && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# Copy dependency metadata first to maximize Docker layer caching
+# -----------------------------------------------------------------------------
+COPY pyproject.toml README.md ./
+
+# Upgrade pip and install dependencies
+RUN python -m pip install --upgrade pip && \
+    pip install --no-cache-dir -e .
+
+# Copy application source
 COPY src ./src
-COPY mcp_server.py ./
+COPY mcp_server.py .
 
-# Install package with all dependencies
-RUN pip install --no-cache-dir -e .
-
-# Install Google Chrome (stable) — used by GCU browser tools via CDP
-RUN apt-get update && apt-get install -y wget gnupg \
-    && mkdir -p /etc/apt/keyrings \
-    && wget -q -O /etc/apt/keyrings/google-chrome.asc https://dl.google.com/linux/linux_signing_key.pub \
-    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.asc] http://dl.google.com/linux/chrome/deb/ stable main" \
-       > /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update && apt-get install -y google-chrome-stable \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# Create non-root user for security
-RUN useradd -m -u 1001 appuser
-
-# Create workspaces directory for file system tools persistence
-# This directory will be mounted as a volume
-RUN mkdir -p /app/workdir/workspaces && \
+# -----------------------------------------------------------------------------
+# Create non-root user
+# -----------------------------------------------------------------------------
+RUN useradd --create-home --uid 1001 appuser && \
+    mkdir -p /app/workdir/workspaces && \
     chown -R appuser:appuser /app
 
 USER appuser
 
-# Declare volume for workspace persistence across container runs
-VOLUME ["/app//workspaces"]
+# Persist workspace data
+VOLUME ["/app/workdir/workspaces"]
 
-# Expose MCP server port
+# OCI image metadata
+LABEL org.opencontainers.image.title="Aden Tools MCP Server" \
+      org.opencontainers.image.description="Model Context Protocol server exposing Aden tools"
+
 EXPOSE 4001
 
-# Health check - verify server is responding
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:4001/health').raise_for_status()" || exit 1
+# -----------------------------------------------------------------------------
+# Health Check
+# -----------------------------------------------------------------------------
+HEALTHCHECK --interval=30s \
+            --timeout=5s \
+            --start-period=10s \
+            --retries=3 \
+CMD python -c "import httpx; httpx.get('http://localhost:4001/health').raise_for_status()"
 
-# Run MCP server with HTTP transport
+# Start MCP server
 CMD ["python", "mcp_server.py"]
